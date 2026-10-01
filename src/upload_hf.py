@@ -1,10 +1,10 @@
 """Upload scraped subreddit parquet files to a Hugging Face dataset.
 
-The dataset is private unless --public is set. Authenticate with HF_TOKEN
-(a write token from https://huggingface.co/settings/tokens). The token is read
-from the environment and is not accepted as a command-line argument.
+The dataset is private unless --public is set. Authenticate with a Hugging Face
+write token from https://huggingface.co/settings/tokens.
 
-Example:
+In Colab, store that token as a secret named HF_TOKEN and enable notebook
+access for it. Locally, export the same name:
 
     export HF_TOKEN=hf_...
     python src/upload_hf.py --repo your-username/sri-lanka-reddit
@@ -84,10 +84,22 @@ def size_category(n_rows):
     return "n>10M"
 
 
-def dataset_card(repo_id, cfg, counts, skipped):
-    subreddits = cfg.get("subreddits") or sorted({
-        name for kind in KINDS for name in counts.get(kind, pd.DataFrame()).get("subreddit", pd.Series(dtype=str)).dropna().unique()
-    })
+def listed_subreddits(frames, cfg):
+    found = []
+    for kind in KINDS:
+        frame = frames[kind]
+        if frame.empty or "subreddit" not in frame.columns:
+            continue
+        found.extend(frame["subreddit"].dropna().astype(str).tolist())
+    found = list(dict.fromkeys(found))
+    configured = [str(name) for name in (cfg.get("subreddits") or [])]
+    if not configured:
+        return sorted(set(found))
+    extras = [name for name in sorted(set(found)) if name not in configured]
+    return configured + extras
+
+
+def dataset_card(repo_id, cfg, counts, skipped, subreddits):
     collection = cfg.get("collection") or {}
     after = collection.get("after")
     before = collection.get("before")
@@ -175,7 +187,7 @@ def stage_dataset(raw_dir, staging_dir, cfg, repo_id):
             f"No non-empty raw parquet files in {raw_dir}. Run collect_arctic.py first."
         )
     (staging_dir / "README.md").write_text(
-        dataset_card(repo_id, cfg, counts, skipped),
+        dataset_card(repo_id, cfg, counts, skipped, listed_subreddits(frames, cfg)),
         encoding="utf-8",
     )
     return {"counts": counts, "skipped": skipped}
@@ -192,11 +204,40 @@ def upload_staged(repo_id, staging_dir, *, private, token, commit_message, api):
     )
 
 
+def secret_from_userdata(userdata, name):
+    try:
+        value = userdata.get(name)
+    except Exception as exc:
+        if type(exc).__name__ == "NotebookAccessError":
+            raise RuntimeError(
+                "Enable notebook access for the Colab secret HF_TOKEN."
+            ) from exc
+        if type(exc).__name__ == "SecretNotFoundError":
+            return None
+        raise
+    return value or None
+
+
+def read_colab_secret(name="HF_TOKEN"):
+    """Read a Colab secret. Returns None outside Colab."""
+    try:
+        from google.colab import userdata
+    except ImportError:
+        return None
+    return secret_from_userdata(userdata, name)
+
+
 def resolve_token(token=None):
-    resolved = token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    resolved = (
+        token
+        or os.environ.get("HF_TOKEN")
+        or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        or read_colab_secret("HF_TOKEN")
+    )
     if not resolved:
         raise RuntimeError(
-            "Set HF_TOKEN to a Hugging Face write token before uploading."
+            "Add a Colab secret named HF_TOKEN with notebook access enabled, "
+            "or set the HF_TOKEN environment variable."
         )
     return resolved
 

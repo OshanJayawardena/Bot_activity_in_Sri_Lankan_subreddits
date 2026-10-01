@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 data/raw/
 data/processed/
+data/hf_staging/
 reports/figures/
 reports/report.html
 reports/candidate_accounts.csv

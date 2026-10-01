@@ -30,10 +30,26 @@ def get_json(session, endpoint, params, sleep_seconds=0.35, retries=5):
             wait = float(r.headers.get("X-RateLimit-Reset", "10"))
             time.sleep(max(wait, sleep_seconds))
             continue
-        r.raise_for_status()
+        if r.status_code >= 400:
+            body = (getattr(r, "text", "") or "").strip()
+            message = f"{r.status_code} Error for url: {r.url}"
+            if body:
+                message = f"{message}: {body[:500]}"
+            raise requests.HTTPError(message, response=r)
         time.sleep(sleep_seconds)
         return r.json()
     raise RuntimeError(f"Repeated rate limiting from {url}")
+
+
+def next_after(created_utc):
+    """Integer epoch second just after ``created_utc``.
+
+    Arctic Shift accepts epoch seconds and ISO-8601 dates. A fractional epoch
+    such as ``1767300949.001`` is rejected with HTTP 400. Reddit timestamps
+    are whole seconds, so the next second keeps every later post.
+    """
+    return str(int(float(created_utc)) + 1)
+
 
 def normalize_payload(payload):
     if isinstance(payload, list):
@@ -64,20 +80,27 @@ def collect(kind, subreddit, after, before, limit, max_pages, sleep):
     if before:
         params["before"] = before
 
+    seen_ids = set()
     last_created = None
     for _ in tqdm(range(max_pages), desc=f"{kind} r/{subreddit}"):
         payload = get_json(session, endpoint, params, sleep)
         batch = normalize_payload(payload)
         if not batch:
             break
-        rows.extend(batch)
+        for row in batch:
+            row_id = row.get("id")
+            if row_id is not None and row_id in seen_ids:
+                continue
+            if row_id is not None:
+                seen_ids.add(row_id)
+            rows.append(row)
 
         created = [x.get("created_utc") for x in batch if x.get("created_utc") is not None]
         current_max = max(created) if created else None
         if current_max is None or current_max == last_created:
             break
         last_created = current_max
-        params["after"] = current_max + 0.001
+        params["after"] = next_after(current_max)
 
         if len(batch) < limit:
             break

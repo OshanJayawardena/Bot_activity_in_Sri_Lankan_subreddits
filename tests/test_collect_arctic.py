@@ -4,10 +4,12 @@ import collect_arctic
 
 
 class FakeResponse:
-    def __init__(self, status, payload, headers=None):
+    def __init__(self, status, payload, headers=None, text="", url="https://example.test/api"):
         self.status_code = status
         self._payload = payload
         self.headers = headers or {}
+        self.text = text
+        self.url = url
 
     def json(self):
         return self._payload
@@ -25,6 +27,12 @@ class FakeSession:
     def get(self, url, params, timeout):
         self.calls.append({"url": url, "params": dict(params), "timeout": timeout})
         return self.responses.pop(0)
+
+
+def test_next_after_is_the_following_integer_second():
+    assert collect_arctic.next_after(1767300949) == "1767300950"
+    assert collect_arctic.next_after(1767300949.9) == "1767300950"
+    assert "." not in collect_arctic.next_after(20)
 
 
 def test_normalize_payload_shapes():
@@ -98,12 +106,15 @@ def test_get_json_raises_after_repeated_rate_limits(monkeypatch):
 def test_get_json_does_not_retry_http_errors(monkeypatch):
     slept = []
     monkeypatch.setattr(collect_arctic.time, "sleep", lambda seconds: slept.append(seconds))
-    session = FakeSession([FakeResponse(500, {"error": "down"})])
+    session = FakeSession([
+        FakeResponse(400, {}, text='{"error":"Invalid date"}', url="https://example.test/posts"),
+    ])
 
     try:
         collect_arctic.get_json(session, "posts/search", {}, sleep_seconds=0.35)
-    except requests.HTTPError:
-        pass
+    except requests.HTTPError as exc:
+        assert "Invalid date" in str(exc)
+        assert "400" in str(exc)
     else:
         raise AssertionError("expected HTTPError")
     assert slept == []
@@ -138,7 +149,7 @@ def test_collect_paginates_until_short_page(monkeypatch):
     assert calls[0][1]["fields"] == collect_arctic.POST_FIELDS
     assert "before" not in calls[0][1]
     assert calls[0][2] == 0.2
-    assert calls[1][1]["after"] == 20.001
+    assert calls[1][1]["after"] == "21"
 
 
 def test_collect_comments_include_before_and_comment_fields(monkeypatch):
@@ -171,10 +182,10 @@ def test_collect_stops_when_cursor_does_not_advance(monkeypatch):
 
     rows = collect_arctic.collect("posts", "srilanka", 0, None, limit=2, max_pages=10, sleep=0)
 
-    # The repeated page is kept, then the cursor check stops the next request.
-    assert [row["id"] for row in rows] == ["1", "2", "1", "2"]
+    # The repeated page is deduped, then the unchanged timestamp stops the loop.
+    assert [row["id"] for row in rows] == ["1", "2"]
     assert len(calls) == 2
-    assert calls[1]["after"] == 50.001
+    assert calls[1]["after"] == "51"
 
 
 def test_collect_stops_when_created_utc_is_missing(monkeypatch):

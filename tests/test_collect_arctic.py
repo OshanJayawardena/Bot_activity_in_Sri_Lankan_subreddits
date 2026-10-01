@@ -103,6 +103,90 @@ def test_get_json_raises_after_repeated_rate_limits(monkeypatch):
     assert len(session.calls) == 3
 
 
+def test_get_json_retries_arctic_shift_timeout_then_succeeds(monkeypatch):
+    slept = []
+    monkeypatch.setattr(collect_arctic.time, "sleep", lambda seconds: slept.append(seconds))
+    session = FakeSession([
+        FakeResponse(
+            422,
+            {},
+            text='{"data":null,"error":"Timeout. Maybe slow down a bit"}',
+        ),
+        FakeResponse(200, {"data": []}),
+    ])
+
+    payload = collect_arctic.get_json(session, "posts/search", {"limit": 100}, sleep_seconds=0.35)
+
+    assert payload == {"data": []}
+    assert len(session.calls) == 2
+    assert slept == [2.0, 0.35]
+
+
+def test_get_json_backs_off_longer_on_repeated_timeouts(monkeypatch):
+    slept = []
+    monkeypatch.setattr(collect_arctic.time, "sleep", lambda seconds: slept.append(seconds))
+    session = FakeSession([
+        FakeResponse(422, {}, text='{"error":"Timeout. Maybe slow down a bit"}'),
+        FakeResponse(422, {}, text='{"error":"Timeout. Maybe slow down a bit"}'),
+        FakeResponse(200, []),
+    ])
+
+    collect_arctic.get_json(session, "posts/search", {}, sleep_seconds=0.35)
+
+    assert slept == [2.0, 4.0, 0.35]
+
+
+def test_get_json_retries_server_errors(monkeypatch):
+    slept = []
+    monkeypatch.setattr(collect_arctic.time, "sleep", lambda seconds: slept.append(seconds))
+    session = FakeSession([
+        FakeResponse(503, {}, text="unavailable"),
+        FakeResponse(200, {"data": [{"id": "1"}]}),
+    ])
+
+    payload = collect_arctic.get_json(session, "posts/search", {}, sleep_seconds=0.35)
+
+    assert payload == {"data": [{"id": "1"}]}
+    assert slept == [2.0, 0.35]
+
+
+def test_get_json_retries_connection_errors(monkeypatch):
+    slept = []
+    monkeypatch.setattr(collect_arctic.time, "sleep", lambda seconds: slept.append(seconds))
+
+    class FlakySession(FakeSession):
+        def get(self, url, params, timeout):
+            self.calls.append({"url": url, "params": dict(params), "timeout": timeout})
+            if len(self.calls) == 1:
+                raise requests.ConnectionError("reset")
+            return self.responses.pop(0)
+
+    session = FlakySession([FakeResponse(200, {"ok": True})])
+
+    payload = collect_arctic.get_json(session, "posts/search", {}, sleep_seconds=0.35)
+
+    assert payload == {"ok": True}
+    assert slept == [2.0, 0.35]
+
+
+def test_get_json_does_not_retry_validation_errors(monkeypatch):
+    slept = []
+    monkeypatch.setattr(collect_arctic.time, "sleep", lambda seconds: slept.append(seconds))
+    session = FakeSession([
+        FakeResponse(422, {}, text='{"error":"Unknown field"}', url="https://example.test/posts"),
+    ])
+
+    try:
+        collect_arctic.get_json(session, "posts/search", {}, sleep_seconds=0.35)
+    except requests.HTTPError as exc:
+        assert "Unknown field" in str(exc)
+        assert "422" in str(exc)
+    else:
+        raise AssertionError("expected HTTPError")
+    assert slept == []
+    assert len(session.calls) == 1
+
+
 def test_get_json_does_not_retry_http_errors(monkeypatch):
     slept = []
     monkeypatch.setattr(collect_arctic.time, "sleep", lambda seconds: slept.append(seconds))

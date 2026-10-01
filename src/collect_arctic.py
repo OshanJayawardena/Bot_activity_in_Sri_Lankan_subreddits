@@ -22,13 +22,46 @@ COMMENT_FIELDS = ",".join([
     "subreddit_id","score","body","link_id","parent_id","distinguished"
 ])
 
-def get_json(session, endpoint, params, sleep_seconds=0.35, retries=5):
+def _is_slowdown(response):
+    """Arctic Shift returns 422 when a query times out and asks the client to pause."""
+    if response.status_code != 422:
+        return False
+    body = (getattr(response, "text", "") or "").lower()
+    return "timeout" in body or "slow down" in body
+
+
+def _is_retryable(response):
+    if response.status_code == 429 or _is_slowdown(response):
+        return True
+    return response.status_code in (500, 502, 503, 504)
+
+
+def _retry_wait(response, attempt, sleep_seconds):
+    if response is not None and response.status_code == 429:
+        try:
+            wait = float(response.headers.get("X-RateLimit-Reset", "10"))
+        except (TypeError, ValueError):
+            wait = 10.0
+        return max(wait, sleep_seconds)
+    # 2s, 4s, 8s, ... capped, so a "slow down" response actually backs off.
+    return min(60.0, max(sleep_seconds, 2.0) * (2 ** attempt))
+
+
+def get_json(session, endpoint, params, sleep_seconds=0.35, retries=8):
     url = f"{BASE}/{endpoint}"
+    last_status = None
     for attempt in range(retries):
-        r = session.get(url, params=params, timeout=60)
-        if r.status_code == 429:
-            wait = float(r.headers.get("X-RateLimit-Reset", "10"))
-            time.sleep(max(wait, sleep_seconds))
+        try:
+            r = session.get(url, params=params, timeout=60)
+        except (requests.Timeout, requests.ConnectionError):
+            last_status = "network"
+            if attempt == retries - 1:
+                raise
+            time.sleep(_retry_wait(None, attempt, sleep_seconds))
+            continue
+        if _is_retryable(r):
+            last_status = r.status_code
+            time.sleep(_retry_wait(r, attempt, sleep_seconds))
             continue
         if r.status_code >= 400:
             body = (getattr(r, "text", "") or "").strip()
@@ -38,7 +71,7 @@ def get_json(session, endpoint, params, sleep_seconds=0.35, retries=5):
             raise requests.HTTPError(message, response=r)
         time.sleep(sleep_seconds)
         return r.json()
-    raise RuntimeError(f"Repeated rate limiting from {url}")
+    raise RuntimeError(f"Repeated rate limiting or timeouts ({last_status}) from {url}")
 
 
 def next_after(created_utc):

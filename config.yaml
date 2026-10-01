@@ -1,0 +1,32 @@
+subreddits:
+  - AskSriLanka
+  - srilanka
+  - Colombo
+
+# Arctic Shift accepts ISO dates, offsets such as 1year, and epoch timestamps.
+collection:
+  after: "2026-01-01"
+  before: null
+  limit_per_request: 100
+  sleep_seconds: 0.35
+  max_pages_per_subreddit: 500
+
+analysis:
+  new_account_days: 30
+  very_new_account_days: 7
+  min_text_chars: 30
+  near_duplicate_threshold: 0.88
+  semantic_similarity_threshold: 0.86
+  temporal_window_minutes: 15
+  min_cluster_size: 3
+  max_embedding_rows: 30000
+
+topics:
+  sinhala: ["sinhala", "sinhalese"]
+  tamil: ["tamil", "tamils"]
+  muslim: ["muslim", "muslims", "islam", "islamic"]
+  buddhist: ["buddhist", "buddhism"]
+  hindu: ["hindu", "hinduism"]
+  christian: ["christian", "christianity"]
+  ethnic: ["ethnic", "ethnicity", "race", "racial"]
+  communal: ["religion", "religious", "communal", "minority", "majority"]

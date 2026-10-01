@@ -1,0 +1,111 @@
+\
+import argparse
+import time
+from pathlib import Path
+from urllib.parse import urlencode
+
+import pandas as pd
+import requests
+import yaml
+from tqdm import tqdm
+
+BASE = "https://arctic-shift.photon-reddit.com/api"
+
+POST_FIELDS = ",".join([
+    "id","author","author_fullname","created_utc","retrieved_on","subreddit",
+    "subreddit_id","score","title","selftext","url","link_flair_text",
+    "num_comments","crosspost_parent"
+])
+
+COMMENT_FIELDS = ",".join([
+    "id","author","author_fullname","created_utc","retrieved_on","subreddit",
+    "subreddit_id","score","body","link_id","parent_id","distinguished"
+])
+
+def get_json(session, endpoint, params, sleep_seconds=0.35, retries=5):
+    url = f"{BASE}/{endpoint}"
+    for attempt in range(retries):
+        r = session.get(url, params=params, timeout=60)
+        if r.status_code == 429:
+            wait = float(r.headers.get("X-RateLimit-Reset", "10"))
+            time.sleep(max(wait, sleep_seconds))
+            continue
+        r.raise_for_status()
+        time.sleep(sleep_seconds)
+        return r.json()
+    raise RuntimeError(f"Repeated rate limiting from {url}")
+
+def normalize_payload(payload):
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("data", "results", "items"):
+            if isinstance(payload.get(key), list):
+                return payload[key]
+        # Some APIs return {data: {children: [...]}}
+        data = payload.get("data")
+        if isinstance(data, dict) and isinstance(data.get("children"), list):
+            return data["children"]
+    return []
+
+def collect(kind, subreddit, after, before, limit, max_pages, sleep):
+    endpoint = "posts/search" if kind == "posts" else "comments/search"
+    fields = POST_FIELDS if kind == "posts" else COMMENT_FIELDS
+    rows = []
+    session = requests.Session()
+    params = {
+        "subreddit": subreddit,
+        "after": after,
+        "limit": limit,
+        "sort": "asc",
+        "fields": fields,
+        "format": "json",
+    }
+    if before:
+        params["before"] = before
+
+    last_created = None
+    for _ in tqdm(range(max_pages), desc=f"{kind} r/{subreddit}"):
+        payload = get_json(session, endpoint, params, sleep)
+        batch = normalize_payload(payload)
+        if not batch:
+            break
+        rows.extend(batch)
+
+        created = [x.get("created_utc") for x in batch if x.get("created_utc") is not None]
+        current_max = max(created) if created else None
+        if current_max is None or current_max == last_created:
+            break
+        last_created = current_max
+        params["after"] = current_max + 0.001
+
+        if len(batch) < limit:
+            break
+
+    return rows
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default="config.yaml")
+    args = ap.parse_args()
+
+    cfg = yaml.safe_load(Path(args.config).read_text())
+    out = Path("data/raw")
+    out.mkdir(parents=True, exist_ok=True)
+
+    after = cfg["collection"]["after"]
+    before = cfg["collection"].get("before")
+    limit = cfg["collection"]["limit_per_request"]
+    sleep = cfg["collection"]["sleep_seconds"]
+    pages = cfg["collection"]["max_pages_per_subreddit"]
+
+    for sr in cfg["subreddits"]:
+        for kind in ("posts", "comments"):
+            rows = collect(kind, sr, after, before, limit, pages, sleep)
+            df = pd.DataFrame(rows)
+            path = out / f"{sr}_{kind}.parquet"
+            df.to_parquet(path, index=False)
+            print(f"{kind:9s} r/{sr}: {len(df):,} rows -> {path}")
+
+if __name__ == "__main__":
+    main()

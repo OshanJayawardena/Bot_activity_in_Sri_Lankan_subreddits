@@ -2,7 +2,7 @@
 
 This project analyses public Reddit activity in:
 
-- r/AskSriLanka
+- r/ask_srilanka
 - r/srilanka
 - r/Colombo
 

@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_config_declares_collection_analysis_and_topics():
     cfg = yaml.safe_load((ROOT / "config.yaml").read_text())
 
-    assert cfg["subreddits"] == ["AskSriLanka", "srilanka", "Colombo"]
+    assert cfg["subreddits"] == ["ask_srilanka", "srilanka", "Colombo"]
     for key in ("after", "limit_per_request", "sleep_seconds", "max_pages_per_subreddit"):
         assert key in cfg["collection"]
     for key in (
@@ -21,6 +21,7 @@ def test_config_declares_collection_analysis_and_topics():
         "temporal_window_minutes",
         "min_cluster_size",
         "max_embedding_rows",
+        "device",
     ):
         assert key in cfg["analysis"]
     assert set(cfg["topics"]) == {

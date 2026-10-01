@@ -1,5 +1,5 @@
 subreddits:
-  - AskSriLanka
+  - ask_srilanka
   - srilanka
   - Colombo
 
@@ -20,6 +20,9 @@ analysis:
   temporal_window_minutes: 15
   min_cluster_size: 3
   max_embedding_rows: 30000
+  # auto uses CUDA when a GPU is visible, otherwise CPU.
+  device: auto
+  embedding_batch_size: null
 
 topics:
   sinhala: ["sinhala", "sinhalese"]

@@ -1,6 +1,7 @@
 import math
 import sys
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -140,3 +141,40 @@ def test_similarity_at_or_above_threshold_is_kept():
     assert similarity >= 0.88
     assert text_analysis.find_near_duplicate_pairs(act, threshold=similarity, n_jobs=1)
     assert text_analysis.find_near_duplicate_pairs(act, threshold=similarity + 0.001, n_jobs=1) == []
+
+
+def test_resolve_device_uses_cuda_only_when_it_is_available():
+    assert text_analysis.resolve_device("auto", cuda_is_available=True) == "cuda"
+    assert text_analysis.resolve_device("auto", cuda_is_available=False) == "cpu"
+    assert text_analysis.resolve_device("cuda", cuda_is_available=False) == "cpu"
+    assert text_analysis.resolve_device("cpu", cuda_is_available=True) == "cpu"
+    assert text_analysis.encode_batch_size(None, "cuda") == 256
+    assert text_analysis.encode_batch_size(None, "cpu") == 32
+    assert text_analysis.encode_batch_size(64, "cpu") == 64
+
+
+def test_labels_from_neighborhoods_marks_border_points_and_noise():
+    neighborhoods = [
+        np.array([0, 1, 2, 3]),
+        np.array([0, 1, 2]),
+        np.array([0, 1, 2]),
+        np.array([0, 3]),
+        np.array([4]),
+    ]
+
+    labels = text_analysis.labels_from_neighborhoods(neighborhoods, min_samples=3)
+
+    assert list(labels) == [0, 0, 0, 0, -1]
+
+
+def test_cosine_neighborhoods_match_a_direct_similarity_cutoff():
+    pytest.importorskip("torch")
+    first = np.array([[1.0, 0.0], [0.98, 0.2], [0.0, 1.0]], dtype=np.float32)
+    first /= np.linalg.norm(first, axis=1, keepdims=True)
+
+    neighborhoods = text_analysis.cosine_neighborhoods(first, min_similarity=0.9, device="cpu", batch_size=2)
+
+    assert list(neighborhoods[0]) == [0, 1]
+    assert list(neighborhoods[1]) == [0, 1]
+    assert list(neighborhoods[2]) == [2]
+    assert text_analysis.cluster_embeddings(first, eps=0.1, min_samples=2, device="cpu", batch_size=2).shape == (3,)

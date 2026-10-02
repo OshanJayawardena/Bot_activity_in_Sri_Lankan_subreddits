@@ -5,6 +5,7 @@ data/raw/
 data/processed/
 data/hf_staging/
 data/report_upload/
+data/processed_upload/
 reports/figures/
 reports/report.html
 reports/network.html

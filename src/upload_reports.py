@@ -115,24 +115,34 @@ Candidate table: [reports/candidate_accounts.csv](reports/candidate_accounts.csv
 """
 
 
-def merge_card(card, results):
-    """Keep the existing dataset-card front matter and replace any Results section."""
-    results = results.strip() + "\n"
+def split_front_matter(card):
     if card.startswith("---"):
         end = card.find("\n---", 3)
         if end != -1:
-            front = card[: end + 4]
-            body = card[end + 4 :]
-        else:
-            front, body = "", card
+            return card[: end + 4], card[end + 4 :]
+    return "", card
+
+
+def replace_section(card, heading, section):
+    """Replace one markdown section, or append it. Later headings stay in place."""
+    section = section.strip() + "\n"
+    front, body = split_front_matter(card)
+    lines = body.splitlines(keepends=True)
+    start = next((i for i, line in enumerate(lines) if line.strip() == heading), None)
+    if start is None:
+        body = body.rstrip() + "\n\n" + section
     else:
-        front, body = "", card
-    marker = f"\n{RESULTS_HEADING}\n"
-    if body.lstrip().startswith(RESULTS_HEADING):
-        body = ""
-    elif marker in body:
-        body = body[: body.index(marker)]
-    return front + body.rstrip() + "\n\n" + results
+        end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+        lines = lines[:start] + [section] + lines[end:]
+        body = "".join(lines)
+    if front and not body.startswith("\n"):
+        body = "\n" + body
+    return front + body
+
+
+def merge_card(card, results):
+    """Keep the existing dataset-card front matter and replace any Results section."""
+    return replace_section(card, RESULTS_HEADING, results)
 
 
 def stage_report_upload(root, reports_dir, staging_dir, card_text):

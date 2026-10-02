@@ -1,6 +1,7 @@
 """Write an interactive reply network to reports/network.html.
 
-Open that file in a browser. Drag nodes, scroll to zoom, and search for an account.
+Open that file in a browser. Search or click an account to see only that account
+and the accounts it exchanged replies with. Edge numbers are reply counts.
 The graph uses reply edges from data/processed/interaction_edges.csv.
 
 Example:
@@ -111,6 +112,7 @@ def graph_payload(edges, features):
         connections = int(degree[account])
         nodes.append({
             "id": account,
+            "degree": connections,
             "r": min(22, 6 + connections),
             "color": node_color(row),
             "tip": node_tip(account, row, connections),
@@ -128,162 +130,119 @@ def render_network_html(payload):
 <html><head><meta charset="utf-8"><title>Reply network</title>
 <style>
 body {{margin:0;font-family:Arial,sans-serif;background:#f4f1ea;color:#1c1a17}}
-header {{display:flex;gap:16px;align-items:center;padding:10px 14px;background:#fff;border-bottom:1px solid #ddd}}
-input {{font:inherit;padding:6px 8px;min-width:240px}}
-#stage {{position:relative;height:calc(100vh - 58px)}}
-canvas {{width:100%;height:100%;display:block;cursor:grab}}
-#tip {{position:absolute;pointer-events:none;background:#1c1a17;color:#fff;padding:8px 10px;border-radius:6px;white-space:pre;font-size:12px;display:none}}
+header {{display:flex;gap:16px;align-items:center;flex-wrap:wrap;padding:10px 14px;background:#fff;border-bottom:1px solid #ddd}}
+.layout {{display:grid;grid-template-columns:300px 1fr;height:calc(100vh - 58px)}}
+aside {{overflow:auto;background:#fff;border-right:1px solid #ddd;padding:10px}}
+input {{font:inherit;padding:6px 8px;width:100%;box-sizing:border-box}}
+button.acct {{display:block;width:100%;text-align:left;font:inherit;border:0;background:transparent;padding:6px 4px;cursor:pointer}}
+button.acct.on {{background:#efe6d6}}
+main {{overflow:auto;padding:16px 20px 32px}}
+svg {{width:100%;height:auto;max-width:920px;display:block}}
+table {{border-collapse:collapse;width:100%;max-width:720px;font-size:14px}}
+th, td {{text-align:left;padding:6px 8px;border-bottom:1px solid #e2dcd2}}
 .legend i {{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px}}
+.muted {{color:#5c564e;font-size:13px}}
 </style></head>
 <body>
 <header>
   <strong>Reply network</strong>
-  <input id="q" placeholder="Find an account" autocomplete="off">
   <span id="count"></span>
   <span class="legend"><i style="background:#d85a30"></i>first seen ≤7d</span>
   <span class="legend"><i style="background:#e0a106"></i>signal score ≥ 0.5</span>
   <span class="legend"><i style="background:#3d6f8f"></i>other accounts</span>
 </header>
-<div id="stage"><canvas id="c"></canvas><div id="tip"></div></div>
+<div class="layout">
+  <aside>
+    <input id="q" placeholder="Find an account" autocomplete="off">
+    <p class="muted">Click an account. The drawing shows only that account and who it replied with.</p>
+    <div id="list"></div>
+  </aside>
+  <main>
+    <h2 id="who"></h2>
+    <p id="detail" class="muted"></p>
+    <svg id="g" viewBox="0 0 900 560"></svg>
+    <h3>Replied to</h3>
+    <table id="pairs"><thead><tr><th>Account</th><th>Direction</th><th>Replies</th></tr></thead><tbody></tbody></table>
+  </main>
+</div>
 <script>
 const data = {blob};
-const canvas = document.getElementById("c");
-const tip = document.getElementById("tip");
-const ctx = canvas.getContext("2d");
-const nodes = data.nodes.map((n, i) => ({{
-  ...n, i,
-  x: Math.cos(i) * 280,
-  y: Math.sin(i * 2.3) * 280,
-  vx: 0, vy: 0
-}}));
+const nodes = data.nodes;
 const links = data.links;
 document.getElementById("count").textContent = nodes.length + " accounts, " + links.length + " replies";
-let scale = 1, ox = 0, oy = 0, drag = null, hover = null, selected = null;
-function resize() {{
-  canvas.width = canvas.clientWidth * devicePixelRatio;
-  canvas.height = canvas.clientHeight * devicePixelRatio;
+function esc(s) {{
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }}
-resize();
-addEventListener("resize", resize);
-function world(ev) {{
-  const r = canvas.getBoundingClientRect();
-  return [(ev.clientX - r.left - ox) / scale, (ev.clientY - r.top - oy) / scale];
+const adj = nodes.map(() => []);
+links.forEach(e => {{
+  adj[e.s].push({{other: e.t, w: e.w, dir: "replied to"}});
+  adj[e.t].push({{other: e.s, w: e.w, dir: "replied from"}});
+}});
+let focus = 0;
+const list = document.getElementById("list");
+const svg = document.getElementById("g");
+function neighbors(i) {{
+  return adj[i].slice().sort((a, b) => b.w - a.w || nodes[a.other].id.localeCompare(nodes[b.other].id));
 }}
-function nodeAt(x, y) {{
-  for (let i = nodes.length - 1; i >= 0; i--) {{
-    const n = nodes[i];
-    const dx = n.x - x, dy = n.y - y;
-    if (dx * dx + dy * dy <= (n.r + 3) * (n.r + 3)) return n;
-  }}
-  return null;
-}}
-canvas.addEventListener("pointerdown", ev => {{
-  const [x, y] = world(ev);
-  const n = nodeAt(x, y);
-  if (n) {{ drag = n; selected = n; }}
-  else {{ drag = "pan"; selected = null; canvas._px = ev.clientX; canvas._py = ev.clientY; }}
-  canvas.setPointerCapture(ev.pointerId);
-}});
-canvas.addEventListener("pointermove", ev => {{
-  const [x, y] = world(ev);
-  if (drag && drag !== "pan") {{ drag.x = x; drag.y = y; drag.vx = 0; drag.vy = 0; }}
-  else if (drag === "pan") {{
-    ox += ev.clientX - canvas._px; oy += ev.clientY - canvas._py;
-    canvas._px = ev.clientX; canvas._py = ev.clientY;
-  }}
-  hover = nodeAt(x, y);
-  const r = canvas.getBoundingClientRect();
-  if (hover) {{
-    tip.style.display = "block";
-    tip.style.left = (ev.clientX - r.left + 12) + "px";
-    tip.style.top = (ev.clientY - r.top + 12) + "px";
-    tip.textContent = hover.tip;
-  }} else tip.style.display = "none";
-}});
-canvas.addEventListener("pointerup", () => {{ drag = null; }});
-canvas.addEventListener("wheel", ev => {{
-  ev.preventDefault();
-  const factor = ev.deltaY < 0 ? 1.08 : 0.92;
-  const r = canvas.getBoundingClientRect();
-  const mx = ev.clientX - r.left, my = ev.clientY - r.top;
-  ox = mx - (mx - ox) * factor;
-  oy = my - (my - oy) * factor;
-  scale *= factor;
-}}, {{passive: false}});
-document.getElementById("q").addEventListener("input", ev => {{
-  const q = ev.target.value.trim().toLowerCase();
-  selected = q ? nodes.find(n => n.id.toLowerCase().includes(q)) || null : null;
-  if (selected) {{
-    const r = canvas.getBoundingClientRect();
-    ox = r.width / 2 - selected.x * scale;
-    oy = r.height / 2 - selected.y * scale;
-  }}
-}});
-function tick() {{
-  const n = nodes.length;
-  for (let i = 0; i < n; i++) {{
-    for (let j = i + 1; j < n; j++) {{
-      let dx = nodes[j].x - nodes[i].x, dy = nodes[j].y - nodes[i].y;
-      let d2 = dx * dx + dy * dy || 0.01;
-      let f = 180 / d2;
-      let d = Math.sqrt(d2);
-      dx /= d; dy /= d;
-      nodes[i].vx -= dx * f; nodes[i].vy -= dy * f;
-      nodes[j].vx += dx * f; nodes[j].vy += dy * f;
-    }}
-    nodes[i].vx += -nodes[i].x * 0.002;
-    nodes[i].vy += -nodes[i].y * 0.002;
-  }}
-  for (const e of links) {{
-    const a = nodes[e.s], b = nodes[e.t];
-    let dx = b.x - a.x, dy = b.y - a.y;
-    a.vx += dx * 0.01; a.vy += dy * 0.01;
-    b.vx -= dx * 0.01; b.vy -= dy * 0.01;
-  }}
-  if (drag && drag !== "pan") {{ drag.vx = 0; drag.vy = 0; }}
-  for (const node of nodes) {{
-    if (node === drag) continue;
-    node.x += node.vx; node.y += node.vy;
-    node.vx *= 0.72; node.vy *= 0.72;
-  }}
+function drawList() {{
+  const q = document.getElementById("q").value.trim().toLowerCase();
+  list.replaceChildren();
+  nodes.forEach((n, i) => {{
+    if (q && !n.id.toLowerCase().includes(q)) return;
+    const b = document.createElement("button");
+    b.className = "acct" + (i === focus ? " on" : "");
+    b.textContent = n.id + "  ·  " + n.degree;
+    b.onclick = () => {{ focus = i; draw(); }};
+    list.appendChild(b);
+  }});
 }}
 function draw() {{
-  const w = canvas.width, h = canvas.height;
-  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
-  ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
-  ctx.save();
-  ctx.translate(ox, oy);
-  ctx.scale(scale, scale);
-  const focus = selected || hover;
-  const near = new Set();
-  if (focus) {{
-    near.add(focus.i);
-    for (const e of links) {{
-      if (e.s === focus.i) near.add(e.t);
-      if (e.t === focus.i) near.add(e.s);
-    }}
-  }}
-  for (const e of links) {{
-    const a = nodes[e.s], b = nodes[e.t];
-    const dim = focus && !(near.has(e.s) && near.has(e.t));
-    ctx.strokeStyle = dim ? "rgba(80,70,60,0.08)" : "rgba(60,50,40,0.45)";
-    ctx.lineWidth = Math.min(5, 0.6 + Math.sqrt(e.w));
-    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-  }}
-  for (const node of nodes) {{
-    const dim = focus && !near.has(node.i);
-    ctx.globalAlpha = dim ? 0.15 : 1;
-    ctx.fillStyle = node.color;
-    ctx.beginPath(); ctx.arc(node.x, node.y, node.r, 0, Math.PI * 2); ctx.fill();
-    if (!dim && (scale > 1.15 || node === focus || node.r > 12)) {{
-      ctx.fillStyle = "#1c1a17";
-      ctx.font = "11px Arial";
-      ctx.fillText(node.id, node.x + node.r + 2, node.y + 3);
-    }}
-  }}
-  ctx.restore();
-  requestAnimationFrame(() => {{ tick(); draw(); }});
+  const n = nodes[focus];
+  const rows = neighbors(focus);
+  const shown = rows.slice(0, 12);
+  document.getElementById("who").textContent = n.id;
+  document.getElementById("detail").textContent = n.tip.replaceAll("\\n", " · ")
+    + (rows.length > shown.length ? " · drawing " + shown.length + " of " + rows.length + " links" : "");
+  const cx = 450, cy = 270, radius = shown.length <= 1 ? 0 : 210;
+  const parts = [];
+  shown.forEach((edge, k) => {{
+    const angle = shown.length === 1 ? -Math.PI / 2 : (-Math.PI / 2) + k * 2 * Math.PI / shown.length;
+    const x = cx + Math.cos(angle) * radius;
+    const y = cy + Math.sin(angle) * radius;
+    const other = nodes[edge.other];
+    parts.push('<line x1="'+cx+'" y1="'+cy+'" x2="'+x+'" y2="'+y+'" stroke="#6d6458" stroke-width="'+(1+Math.min(6, Math.sqrt(edge.w)))+'" />');
+    const mx = (cx + x) / 2, my = (cy + y) / 2;
+    parts.push('<text x="'+mx+'" y="'+my+'" text-anchor="middle" font-size="12" fill="#1c1a17">'+edge.w+'</text>');
+    parts.push('<g data-i="'+edge.other+'" style="cursor:pointer">');
+    parts.push('<circle cx="'+x+'" cy="'+y+'" r="16" fill="'+other.color+'" />');
+    const anchor = x >= cx ? "start" : "end";
+    const tx = x + (x >= cx ? 20 : -20);
+    parts.push('<text x="'+tx+'" y="'+(y+4)+'" text-anchor="'+anchor+'" font-size="13" fill="#1c1a17">'+esc(other.id)+'</text>');
+    parts.push("</g>");
+  }});
+  parts.push('<circle cx="'+cx+'" cy="'+cy+'" r="22" fill="'+n.color+'" />');
+  parts.push('<text x="'+cx+'" y="'+(cy-32)+'" text-anchor="middle" font-size="14" font-weight="700" fill="#1c1a17">'+esc(n.id)+'</text>');
+  svg.innerHTML = parts.join("");
+  svg.querySelectorAll("g[data-i]").forEach(g => {{
+    g.onclick = () => {{ focus = Number(g.dataset.i); draw(); }};
+  }});
+  const body = document.querySelector("#pairs tbody");
+  body.replaceChildren();
+  rows.forEach(edge => {{
+    const tr = document.createElement("tr");
+    const other = nodes[edge.other];
+    tr.innerHTML = "<td></td><td>"+edge.dir+"</td><td>"+edge.w+"</td>";
+    const cell = tr.firstChild;
+    const jump = document.createElement("button");
+    jump.className = "acct";
+    jump.textContent = other.id;
+    jump.onclick = () => {{ focus = edge.other; draw(); }};
+    cell.appendChild(jump);
+    body.appendChild(tr);
+  }});
+  drawList();
 }}
+document.getElementById("q").addEventListener("input", drawList);
 draw();
 </script>
 </body></html>

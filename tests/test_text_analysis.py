@@ -4,6 +4,7 @@ import sys
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 import text_analysis
 
@@ -178,3 +179,23 @@ def test_cosine_neighborhoods_match_a_direct_similarity_cutoff():
     assert list(neighborhoods[1]) == [0, 1]
     assert list(neighborhoods[2]) == [2]
     assert text_analysis.cluster_embeddings(first, eps=0.1, min_samples=2, device="cpu", batch_size=2).shape == (3,)
+
+
+def test_sparse_topk_keeps_each_row_and_drops_self_pairs():
+    pytest.importorskip("torch")
+    docs = [DUP, DUP, "unrelated note about bus routes in kandy today please"]
+    matrix = TfidfVectorizer(analyzer="char", ngram_range=(3, 5), min_df=1).fit_transform(docs)
+    distances, indices = text_analysis.sparse_topk_cosine(matrix, k=2, device="cpu", batch_size=2)
+
+    assert indices.shape == (3, 2)
+    for row in range(3):
+        assert row in set(indices[row].tolist())
+
+    act = rows([
+        {"id": "a1", "author": "alice", "created_utc": 1, "text": DUP, "subreddit": "srilanka"},
+        {"id": "a2", "author": "alice", "created_utc": 2, "text": DUP, "subreddit": "srilanka"},
+    ])
+    act = text_analysis.eligible_activity(act, min_text_chars=30)
+    same = np.array([[0, 1], [1, 0]])
+    zeros = np.zeros_like(same, dtype=float)
+    assert text_analysis.pairs_from_neighbor_arrays(act, same, zeros, threshold=0.88) == []

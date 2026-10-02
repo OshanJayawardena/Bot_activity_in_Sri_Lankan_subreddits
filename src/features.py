@@ -1,4 +1,6 @@
 import argparse
+from collections import Counter
+from itertools import combinations
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -94,18 +96,21 @@ def build_interaction_edges(valid):
 def build_shared_thread_edges(valid):
     """Undirected co-participation edges. Threads larger than 80 authors are skipped."""
     valid = valid.sort_values(["author", "created_dt"])
-    thread_edges = []
-    for link_id, g in valid.groupby("link_id", dropna=True):
-        authors = [a for a in g["author"].unique() if a != "[deleted]"]
-        if len(authors) < 2 or len(authors) > 80:
+    counts = Counter()
+    grouped = valid.groupby("link_id", dropna=True)["author"]
+    n_threads = grouped.ngroups
+    for i, (_, authors) in enumerate(grouped, start=1):
+        unique = pd.unique(authors.to_numpy())
+        unique = unique[unique != "[deleted]"]
+        if len(unique) < 2 or len(unique) > 80:
             continue
-        for i, a in enumerate(authors):
-            for b in authors[i+1:]:
-                thread_edges.append((a, b, 1))
-    if thread_edges:
-        te = pd.DataFrame(thread_edges, columns=["source", "target", "weight"])
-        return te.groupby(["source", "target"], as_index=False)["weight"].sum()
-    return pd.DataFrame(columns=["source", "target", "weight"])
+        counts.update(combinations(unique.tolist(), 2))
+        if i % 2000 == 0:
+            print(f"  shared threads {i:,}/{n_threads:,}", flush=True)
+    if not counts:
+        return pd.DataFrame(columns=["source", "target", "weight"])
+    pairs = pd.DataFrame(((a, b, weight) for (a, b), weight in counts.items()), columns=["source", "target", "weight"])
+    return pairs
 
 def main():
     ap = argparse.ArgumentParser()
@@ -121,15 +126,19 @@ def main():
     valid = df[~df["author"].eq("[deleted]")].copy()
     features = build_account_features(valid, cfg)
     features.to_csv(out / "account_features.csv")
-    print(f"Saved {len(features):,} account feature rows.")
-    print(features.sort_values(["new_account_7d", "activity_count"], ascending=False).head(25).to_string())
+    print(f"Saved {len(features):,} account feature rows.", flush=True)
+    print(features.sort_values(["new_account_7d", "activity_count"], ascending=False).head(25).to_string(), flush=True)
 
+    print("Building reply edges...", flush=True)
     valid = valid.sort_values(["author", "created_dt"])
     edge_counts = build_interaction_edges(valid)
     edge_counts.to_csv(out / "interaction_edges.csv", index=False)
+    print(f"Reply edges: {len(edge_counts):,}", flush=True)
 
+    print("Building shared-thread edges...", flush=True)
     te = build_shared_thread_edges(valid)
     te.to_csv(out / "shared_thread_edges.csv", index=False)
+    print(f"Shared-thread edges: {len(te):,}", flush=True)
 
 if __name__ == "__main__":
     main()

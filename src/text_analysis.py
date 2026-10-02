@@ -19,36 +19,91 @@ def eligible_activity(act, min_text_chars):
     act["norm_text"] = act["text"].map(norm_text)
     return act
 
-def find_near_duplicate_pairs(act, threshold, n_jobs=-1):
+def sparse_topk_cosine(matrix, k, device, batch_size):
+    """Top-k cosine neighbors for an L2-normalized sparse TF-IDF matrix.
+
+    On CUDA the corpus stays sparse and each query batch is multiplied on the GPU.
+    """
+    import torch
+    matrix = matrix.tocsr().astype(np.float32)
+    n = matrix.shape[0]
+    k = min(k, n)
+    sparse = torch.sparse_csr_tensor(
+        torch.from_numpy(matrix.indptr.astype(np.int64, copy=False)),
+        torch.from_numpy(matrix.indices.astype(np.int64, copy=False)),
+        torch.from_numpy(np.ascontiguousarray(matrix.data)),
+        size=matrix.shape,
+        device=device,
+    )
+    indices = np.empty((n, k), dtype=np.int64)
+    distances = np.empty((n, k), dtype=np.float32)
+    for start in range(0, n, batch_size):
+        stop = min(start + batch_size, n)
+        queries = torch.from_numpy(np.ascontiguousarray(matrix[start:stop].toarray())).to(device)
+        similarity = torch.sparse.mm(sparse, queries.T).T
+        values, neighbors = torch.topk(similarity, k=k, dim=1)
+        indices[start:stop] = neighbors.detach().cpu().numpy()
+        distances[start:stop] = (1 - values).detach().cpu().numpy()
+        if start == 0 or stop == n or (start // batch_size) % 20 == 0:
+            print(f"  compared {stop:,}/{n:,} texts on {device}", flush=True)
+    return distances, indices
+
+
+def cpu_neighbors(matrix, k, n_jobs):
+    from sklearn.neighbors import NearestNeighbors
+    nn = NearestNeighbors(n_neighbors=k, metric="cosine", n_jobs=n_jobs)
+    nn.fit(matrix)
+    return nn.kneighbors(matrix)
+
+
+def pairs_from_neighbor_arrays(act, indices, distances, threshold):
+    """Cross-account pairs. A row is not paired with itself."""
+    authors = act["author"].to_numpy()
+    ids = act["id"].to_numpy()
+    created = act["created_dt"].to_numpy()
+    subreddits = act["subreddit"].to_numpy()
+    texts = act["text"].to_numpy()
+    similarity = 1 - distances
+    row = np.arange(indices.shape[0])[:, None]
+    mask = (similarity >= threshold) & (indices != row) & (authors[indices] != authors[:, None])
+    left, column = np.nonzero(mask)
+    right = indices[left, column]
+    scores = similarity[left, column]
+    pairs = []
+    for a, b, score in zip(left, right, scores):
+        pairs.append({
+            "id_a": ids[a],
+            "id_b": ids[b],
+            "author_a": authors[a],
+            "author_b": authors[b],
+            "similarity": float(score),
+            "created_a": created[a],
+            "created_b": created[b],
+            "subreddit_a": subreddits[a],
+            "subreddit_b": subreddits[b],
+            "text_a": texts[a],
+            "text_b": texts[b],
+        })
+    return pairs
+
+
+def find_near_duplicate_pairs(act, threshold, n_jobs=-1, device="cpu", batch_size=256):
     """Cross-account pairs whose character n-gram cosine similarity meets ``threshold``."""
     if len(act) < 2:
         return []
+    print(f"Near-duplicate search on {device}: {len(act):,} texts", flush=True)
     vectorizer = TfidfVectorizer(analyzer="char", ngram_range=(3, 5), min_df=2, max_features=100000)
-    X = vectorizer.fit_transform(act["norm_text"])
-    from sklearn.neighbors import NearestNeighbors
-    nn = NearestNeighbors(n_neighbors=min(10, len(act)), metric="cosine", n_jobs=n_jobs)
-    nn.fit(X)
-    distances, indices = nn.kneighbors(X)
-
-    pairs = []
-    for i in range(len(act)):
-        for j, d in zip(indices[i, 1:], distances[i, 1:]):
-            sim = 1 - d
-            if sim >= threshold and act.iloc[i]["author"] != act.iloc[j]["author"]:
-                pairs.append({
-                    "id_a": act.iloc[i]["id"],
-                    "id_b": act.iloc[j]["id"],
-                    "author_a": act.iloc[i]["author"],
-                    "author_b": act.iloc[j]["author"],
-                    "similarity": float(sim),
-                    "created_a": act.iloc[i]["created_dt"],
-                    "created_b": act.iloc[j]["created_dt"],
-                    "subreddit_a": act.iloc[i]["subreddit"],
-                    "subreddit_b": act.iloc[j]["subreddit"],
-                    "text_a": act.iloc[i]["text"],
-                    "text_b": act.iloc[j]["text"],
-                })
-    return pairs
+    matrix = vectorizer.fit_transform(act["norm_text"])
+    k = min(10, len(act))
+    if device == "cuda":
+        try:
+            distances, indices = sparse_topk_cosine(matrix, k, device, batch_size)
+        except Exception as exc:
+            print(f"GPU near-duplicate search failed ({exc}). Using CPU.", flush=True)
+            distances, indices = cpu_neighbors(matrix, k, n_jobs)
+    else:
+        distances, indices = cpu_neighbors(matrix, k, n_jobs)
+    return pairs_from_neighbor_arrays(act, indices, distances, threshold)
 
 def embedding_frame(act, nmax):
     """Latest ``nmax`` rows, which is the slice embedded in the pipeline."""
@@ -180,25 +235,26 @@ def main():
     args = ap.parse_args()
     cfg = yaml.safe_load(Path(args.config).read_text())
 
+    device = select_device(cfg["analysis"].get("device"))
+    batch_size = encode_batch_size(cfg["analysis"].get("embedding_batch_size"), device)
+    if device == "cuda":
+        import torch
+        print(f"Embedding device: cuda ({torch.cuda.get_device_name(0)}), batch size {batch_size}", flush=True)
+    else:
+        print(f"Embedding device: cpu, batch size {batch_size}", flush=True)
+
     act = pd.read_parquet("data/processed/activity.parquet")
     act = eligible_activity(act, cfg["analysis"]["min_text_chars"])
 
     threshold = cfg["analysis"]["near_duplicate_threshold"]
-    pairs = find_near_duplicate_pairs(act, threshold)
+    pairs = find_near_duplicate_pairs(act, threshold, device=device, batch_size=max(batch_size, 128))
     pd.DataFrame(pairs).to_parquet("data/processed/near_duplicate_pairs.parquet", index=False)
 
     # Semantic embeddings. CUDA is used when a GPU is available.
     # The model import stays inside this function so unit tests never download it.
     nmax = cfg["analysis"]["max_embedding_rows"]
     emb_df = embedding_frame(act, nmax)
-    device = select_device(cfg["analysis"].get("device"))
-    batch_size = encode_batch_size(cfg["analysis"].get("embedding_batch_size"), device)
-    if device == "cuda":
-        import torch
-        gpu_name = torch.cuda.get_device_name(0)
-        print(f"Embedding device: cuda ({gpu_name}), batch size {batch_size}")
-    else:
-        print(f"Embedding device: cpu, batch size {batch_size}")
+    print(f"Encoding {len(emb_df):,} texts on {device}", flush=True)
     embeddings = encode_texts(emb_df["text"].tolist(), "all-MiniLM-L6-v2", device, batch_size)
     if device == "cuda":
         import torch

@@ -45,3 +45,5 @@ def test_network_html_colors_new_accounts_and_escapes_names():
     assert "#d85a30" in html
     assert "signal score" in html
     assert "accounts, " in html
+    assert "only that account" in html
+    assert "Replied to" in html

@@ -7,4 +7,5 @@ data/hf_staging/
 data/report_upload/
 reports/figures/
 reports/report.html
+reports/network.html
 reports/candidate_accounts.csv
